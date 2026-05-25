@@ -1,120 +1,26 @@
-"""
-One-time ingest: reads policy.txt, embeds chunks, stores in Supabase pgvector.
-Run: python ingest.py
-"""
+name: Auto Ingest Documents
 
-import json, time, urllib.request, urllib.parse, os
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
 
-GEMINI_KEY  = 'AIzaSyBa89ZaXLh_K41NDV2jgpmAkXoNJLMXS2g'
-SUPA_URL    = 'https://gycqmoyejuteauecicgm.supabase.co'
-SUPA_KEY    = 'sb_publishable_U5MxbKOtUYENBJpUMBlaWg_EdbBC_AX'
-POLICY_FILE = '../DSV CHATBOT/fristine-assistant/public/data/policy.txt'
-SOURCE_NAME = 'Fristine_Company_Policy_Formatted.pdf'
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
 
-SUPA_HEADERS = {
-    'Content-Type': 'application/json',
-    'Authorization': f'Bearer {SUPA_KEY}',
-    'apikey': SUPA_KEY,
-}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
 
-# ── helpers ───────────────────────────────────────────────────────────────────
+      - name: Install dependencies
+        run: pip install pymupdf python-pptx python-docx openpyxl requests
 
-def http_request(url, method='GET', headers=None, data=None):
-    body = json.dumps(data).encode() if data else None
-    req = urllib.request.Request(url, data=body, headers=headers or {}, method=method)
-    try:
-        with urllib.request.urlopen(req) as r:
-            return r.status, r.read().decode()
-    except urllib.error.HTTPError as e:
-        return e.code, e.read().decode()
-
-def embed_text(text):
-    url = f'https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent?key={GEMINI_KEY}'
-    status, body = http_request(url, 'POST', {'Content-Type': 'application/json'},
-                                 {'content': {'parts': [{'text': text}]}, 'outputDimensionality': 768})
-    if status != 200:
-        msg = json.loads(body).get('error', {}).get('message', f'HTTP {status}')
-        raise Exception(f'[{status}] {msg}')
-    return json.loads(body)['embedding']['values']
-
-def insert_row(content, embedding):
-    url = f'{SUPA_URL}/rest/v1/documents'
-    headers = {**SUPA_HEADERS, 'Prefer': 'return=minimal'}
-    status, body = http_request(url, 'POST', headers,
-                                 {'content': content, 'embedding': f'[{",".join(str(v) for v in embedding)}]', 'source': SOURCE_NAME})
-    if status >= 300:
-        raise Exception(f'Supabase {status}: {body}')
-
-def clear_source():
-    url = f'{SUPA_URL}/rest/v1/documents?source=eq.{urllib.parse.quote(SOURCE_NAME)}'
-    http_request(url, 'DELETE', SUPA_HEADERS)
-
-def get_count():
-    url = f'{SUPA_URL}/rest/v1/documents?select=source'
-    req = urllib.request.Request(url, headers={**SUPA_HEADERS, 'Prefer': 'count=exact'})
-    try:
-        with urllib.request.urlopen(req) as r:
-            cr = r.headers.get('content-range', '*/0')
-            return cr.split('/')[-1]
-    except:
-        return '?'
-
-def chunk_text(text, size=600, overlap=100):
-    cleaned = text.replace('\r\n', '\n').strip()
-    chunks = []
-    start = 0
-    while start < len(cleaned):
-        end = min(start + size, len(cleaned))
-        if end < len(cleaned):
-            dot = cleaned.rfind('.', start + int(size * 0.4), end)
-            nl  = cleaned.rfind('\n', start + int(size * 0.4), end)
-            best = max(dot, nl)
-            if best > start:
-                end = best + 1
-        chunk = cleaned[start:end].strip()
-        if len(chunk) > 40:
-            chunks.append(chunk)
-        next_start = end - overlap
-        if next_start <= start:   # guarantee forward progress
-            next_start = start + max(1, size - overlap)
-        start = next_start
-    return chunks
-
-# ── main ──────────────────────────────────────────────────────────────────────
-
-script_dir = os.path.dirname(os.path.abspath(__file__))
-policy_path = os.path.join(script_dir, POLICY_FILE)
-
-print('Reading policy.txt…')
-with open(policy_path, 'r', encoding='utf-8') as f:
-    text = f.read()
-print(f'Length: {len(text)} chars')
-
-print('Clearing old rows…')
-clear_source()
-print('Cleared.\n')
-
-chunks = chunk_text(text)
-print(f'Chunks to embed: {len(chunks)}\n')
-
-ok = fail = 0
-for i, chunk in enumerate(chunks):
-    print(f'[{i+1}/{len(chunks)}] ', end='', flush=True)
-    try:
-        emb = embed_text(chunk)
-        insert_row(chunk, emb)
-        print('OK')
-        ok += 1
-        time.sleep(0.4)
-    except Exception as e:
-        msg = str(e)
-        print(f'FAIL: {msg}')
-        fail += 1
-        if '429' in msg or 'quota' in msg.lower():
-            print('  Rate limited — waiting 15s…')
-            time.sleep(15)
-        else:
-            time.sleep(1)
-
-print(f'\nDone! Inserted: {ok}  Failed: {fail}')
-print(f'Total rows in Supabase: {get_count()}')
+      - name: Run ingest
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python scripts/auto_ingest.py
