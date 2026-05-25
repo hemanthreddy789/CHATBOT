@@ -17,42 +17,110 @@ SUPA_HEADERS = {
     'apikey': SUPA_KEY,
 }
 
-SUPPORTED = ('.pdf', '.pptx', '.ppt', '.docx', '.doc', '.txt')
+# All files are attempted — binary/unreadable ones are skipped automatically.
+# Known skip extensions (images, executables, archives, etc.)
+SKIP_EXTS = {
+    '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.ico', '.svg', '.webp',
+    '.mp3', '.mp4', '.wav', '.avi', '.mov', '.mkv',
+    '.zip', '.tar', '.gz', '.rar', '.7z',
+    '.exe', '.dll', '.so', '.bin', '.pyc',
+    '.lock', '.sum', '.mod',
+}
 
 # ── Text extraction ────────────────────────────────────────────────────────────
 
 def extract_pdf(path):
-    import fitz  # pymupdf
+    import fitz
     doc = fitz.open(path)
     return '\n'.join(page.get_text() for page in doc)
 
 def extract_pptx(path):
     from pptx import Presentation
     prs = Presentation(path)
-    text = []
+    parts = []
     for slide in prs.slides:
         for shape in slide.shapes:
             if hasattr(shape, 'text') and shape.text.strip():
-                text.append(shape.text.strip())
-    return '\n'.join(text)
+                parts.append(shape.text.strip())
+    return '\n'.join(parts)
 
 def extract_docx(path):
     from docx import Document
     doc = Document(path)
     return '\n'.join(p.text for p in doc.paragraphs if p.text.strip())
 
+def extract_xlsx(path):
+    import openpyxl
+    wb = openpyxl.load_workbook(path, data_only=True)
+    rows = []
+    for sheet in wb.worksheets:
+        rows.append(f'[Sheet: {sheet.title}]')
+        for row in sheet.iter_rows(values_only=True):
+            cells = [str(c) for c in row if c is not None and str(c).strip()]
+            if cells:
+                rows.append(' | '.join(cells))
+    return '\n'.join(rows)
+
+def extract_csv(path):
+    import csv
+    rows = []
+    with open(path, encoding='utf-8', errors='ignore', newline='') as f:
+        reader = csv.reader(f)
+        for row in reader:
+            line = ' | '.join(cell.strip() for cell in row if cell.strip())
+            if line:
+                rows.append(line)
+    return '\n'.join(rows)
+
+def extract_html(path):
+    from html.parser import HTMLParser
+    class TextExtractor(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.parts = []
+            self._skip = False
+        def handle_starttag(self, tag, attrs):
+            if tag in ('script', 'style'):
+                self._skip = True
+        def handle_endtag(self, tag):
+            if tag in ('script', 'style'):
+                self._skip = False
+        def handle_data(self, data):
+            if not self._skip and data.strip():
+                self.parts.append(data.strip())
+    with open(path, encoding='utf-8', errors='ignore') as f:
+        raw = f.read()
+    p = TextExtractor()
+    p.feed(raw)
+    return '\n'.join(p.parts)
+
+def read_as_text(path):
+    """Fallback: try reading the file as UTF-8 text."""
+    try:
+        with open(path, encoding='utf-8', errors='ignore') as f:
+            return f.read()
+    except Exception:
+        return ''
+
 def extract_text(path):
     ext = os.path.splitext(path)[1].lower()
+    if ext in SKIP_EXTS:
+        return ''
     if ext == '.pdf':
         return extract_pdf(path)
     elif ext in ('.pptx', '.ppt'):
         return extract_pptx(path)
     elif ext in ('.docx', '.doc'):
         return extract_docx(path)
-    elif ext == '.txt':
-        with open(path, encoding='utf-8', errors='ignore') as f:
-            return f.read()
-    return ''
+    elif ext in ('.xlsx', '.xls'):
+        return extract_xlsx(path)
+    elif ext == '.csv':
+        return extract_csv(path)
+    elif ext in ('.html', '.htm'):
+        return extract_html(path)
+    else:
+        # TXT, MD, JSON, RTF, YAML, XML, code files — all read as text
+        return read_as_text(path)
 
 # ── Chunking ───────────────────────────────────────────────────────────────────
 
@@ -210,8 +278,9 @@ def main():
     for root, dirs, files in os.walk('.'):
         dirs[:] = [d for d in dirs if d not in ('.github', 'scripts', '.git', 'node_modules', '__pycache__')]
         for fname in files:
-            if fname.lower().endswith(SUPPORTED):
-                all_files.append(os.path.join(root, fname))
+                ext = os.path.splitext(fname)[1].lower()
+                if ext not in SKIP_EXTS and not fname.startswith('.'):
+                    all_files.append(os.path.join(root, fname))
 
     if not all_files:
         print('No supported files found in repo.')
