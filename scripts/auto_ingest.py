@@ -55,10 +55,15 @@ def extract_xlsx(path):
     rows = []
     for sheet in wb.worksheets:
         rows.append(f'[Sheet: {sheet.title}]')
+        row_count = 0
         for row in sheet.iter_rows(values_only=True):
-            cells = [str(c) for c in row if c is not None and str(c).strip()]
+            cells = [str(c).strip() for c in row if c is not None and str(c).strip()]
             if cells:
                 rows.append(' | '.join(cells))
+                row_count += 1
+            if row_count >= 2000:  # cap at 2000 rows per sheet
+                rows.append('[...truncated]')
+                break
     return '\n'.join(rows)
 
 def extract_csv(path):
@@ -230,7 +235,10 @@ def ingest_file(filepath, source_name, sha=None, force=False):
         except Exception as e:
             print(f'  [{i+1}/{len(chunks)}] ✗ {e}')
             fail += 1
-            if '429' in str(e):
+            if '403' in str(e) or 'leaked' in str(e).lower() or 'invalid' in str(e).lower():
+                print('  API key error — stopping.')
+                break
+            elif '429' in str(e):
                 print('  Rate limited — waiting 15s...')
                 time.sleep(15)
             else:
